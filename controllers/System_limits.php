@@ -20,7 +20,7 @@ class System_limits extends AdminController
         }
 
         if ($this->input->post()) {
-            $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','media'];
+            $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','tickets','media'];
             foreach ($resources as $r) {
                 $this->sl_model->upsert($r, $this->input->post('limit_'.$r), $this->input->post('enabled_'.$r) ? 1 : 0);
             }

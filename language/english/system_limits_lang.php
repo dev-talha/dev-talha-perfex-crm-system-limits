@@ -21,6 +21,7 @@ $lang['system_limits_estimates'] = 'Estimates';
 $lang['system_limits_invoices'] = 'Invoices';
 $lang['system_limits_projects'] = 'Projects';
 $lang['system_limits_tasks'] = 'Tasks';
+$lang['system_limits_tickets'] = 'Tickets';
 $lang['system_limits_media'] = 'Media / Attachments';
 $lang['system_limits_storage_settings'] = 'Storage Settings';
 $lang['system_limits_enable_storage_limit'] = 'Enable global storage limit';

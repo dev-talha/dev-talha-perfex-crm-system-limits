@@ -567,6 +567,10 @@ Fix response handling for AJAX and non-AJAX requests separately.
 ---
 
 # Changelog
+## Version 2.4.4
+
+Added professional Ticket resource limit support. Ticket counts use the native `tbltickets` table and creation is blocked through lightweight Perfex hooks when the configured package limit is reached. Existing functionality remains unchanged.
+
 
 ## v2.4.3
 

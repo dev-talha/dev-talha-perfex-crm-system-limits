@@ -41,6 +41,8 @@ function system_limits_usage($resource)
         case 'invoices': return (int) $CI->db->count_all(db_prefix().'invoices');
         case 'projects': return (int) $CI->db->count_all(db_prefix().'projects');
         case 'tasks': return (int) $CI->db->count_all(db_prefix().'tasks');
+        case 'tickets':
+            return $CI->db->table_exists(db_prefix().'tickets') ? (int) $CI->db->count_all(db_prefix().'tickets') : 0;
         case 'media':
             if ($CI->db->table_exists(db_prefix().'system_storage_files')) {
                 return (int)$CI->db->where('is_deleted',0)->count_all_results(db_prefix().'system_storage_files');
@@ -82,9 +84,9 @@ function system_limits_block_or_return($resource)
     $CI = &get_instance();
     if ($CI->input->is_ajax_request()) {
         http_response_code(400);
-        // Perfex lead AJAX forms display the raw response body when an error is returned.
-        // Return plain text for lead-limit blocks so the user sees only the message, not JSON.
-        if ($resource === 'leads') {
+        // Some Perfex AJAX forms display the raw response body when an error is returned.
+        // Return plain text for lead/ticket limit blocks so users see only the clean message.
+        if (in_array($resource, ['leads', 'tickets'], true)) {
             header('Content-Type: text/plain; charset=utf-8');
             echo $msg; exit;
         }
@@ -217,7 +219,7 @@ function system_limits_elfinder_removed($cmd, $result, $args, $elfinder, $volume
 function system_limits_resource_label($resource)
 {
     $labels = [
-        'leads'=>'Leads','staff'=>'Staff','customers'=>'Customers','proposals'=>'Proposals','estimates'=>'Estimates','invoices'=>'Invoices','projects'=>'Projects','tasks'=>'Tasks','media'=>'Media / Attachments'
+        'leads'=>'Leads','staff'=>'Staff','customers'=>'Customers','proposals'=>'Proposals','estimates'=>'Estimates','invoices'=>'Invoices','projects'=>'Projects','tasks'=>'Tasks','tickets'=>'Tickets','media'=>'Media / Attachments'
     ];
     return $labels[$resource] ?? ucfirst($resource);
 }

@@ -305,7 +305,7 @@ class System_limits_model extends App_Model
 
     public function resource_overview()
     {
-        $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','media'];
+        $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','tickets','media'];
         $out = [];
         foreach ($resources as $resource) {
             $row = $this->get_limit($resource);

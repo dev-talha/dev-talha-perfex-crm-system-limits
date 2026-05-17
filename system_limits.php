@@ -4,7 +4,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 /*
 Module Name: Limit Setup
 Description: Professional global record limits and storage limit management for Perfex CRM with reports, permissions, dashboard widget, audit logs, quota warnings and storage scans.
-Version: 2.4.3
+Version: 2.4.4
 Author: System Limits Pro
 Requires at least: 3.1.*
 */
@@ -112,6 +112,8 @@ function system_limits_app_init()
     $CI = &get_instance();
     $CI->load->helper(SYSTEM_LIMITS_MODULE_NAME . '/system_limits');
     system_limits_check_pending_uploads();
+    require_once(module_dir_path(SYSTEM_LIMITS_MODULE_NAME, 'hooks/system_limits_hooks.php'));
+    system_limits_register_record_hooks();
 }
 
 function system_limits_clients_area_init()
@@ -297,7 +299,7 @@ function system_limits_ensure_schema()
     system_limits_add_index_if_missing($files, 'idx_sl_source', '`source_table`,`source_id`');
     system_limits_add_index_if_missing($cache, 'idx_sl_cache_staff_module', '`staff_id`,`module_name`');
 
-    $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','media'];
+    $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','tickets','media'];
     foreach ($resources as $r) {
         $CI->db->where('resource', $r);
         if (!$CI->db->get($limits)->row()) {
