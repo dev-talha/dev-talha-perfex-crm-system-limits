@@ -4,7 +4,7 @@ A professional Perfex CRM module for managing package/resource limits, global fi
 
 > Module menu name: **Limit Setup**  
 > Report menu name: **System Limit**  
-> Latest documented version: **v2.4.3**
+> Latest documented version: **v2.4.5**
 
 ---
 
@@ -567,6 +567,11 @@ Fix response handling for AJAX and non-AJAX requests separately.
 ---
 
 # Changelog
+
+## Version 2.4.5
+
+Added a centralized storage inventory system so third-party module files stored under application upload/media roots are included in the storage limit calculation. The module now syncs the file inventory from a common storage service, and third-party modules can register custom storage roots or call the storage register/remove helpers when they add, update, or delete files. Existing limits, hidden-admin logic, and report behavior remain unchanged.
+
 ## Version 2.4.4
 
 Added professional Ticket resource limit support. Ticket counts use the native `tbltickets` table and creation is blocked through lightweight Perfex hooks when the configured package limit is reached. Existing functionality remains unchanged.
