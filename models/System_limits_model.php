@@ -172,64 +172,322 @@ class System_limits_model extends App_Model
         }
     }
 
-    public function scan_storage_files()
+
+
+    private function storage_sync_interval_seconds()
     {
+        $seconds = (int)get_option('system_limits_storage_sync_interval_seconds');
+        return $seconds > 0 ? $seconds : 120;
+    }
+
+    private function storage_last_sync_at()
+    {
+        return (int)get_option('system_limits_storage_last_sync_at');
+    }
+
+    private function storage_sync_due($force = false)
+    {
+        if ($force) {
+            return true;
+        }
+
+        $last = $this->storage_last_sync_at();
+        if ($last <= 0) {
+            return true;
+        }
+
+        return (time() - $last) >= $this->storage_sync_interval_seconds();
+    }
+
+    private function storage_normalize_path($path)
+    {
+        $path = trim(str_replace(["\r", "\n"], '', (string)$path));
+        if ($path === '') {
+            return '';
+        }
+
+        $real = @realpath($path);
+        if ($real !== false && $real !== '') {
+            $path = $real;
+        }
+
+        return rtrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path), DIRECTORY_SEPARATOR);
+    }
+
+    private function storage_build_key($data)
+    {
+        if (!empty($data['storage_key'])) {
+            return (string)$data['storage_key'];
+        }
+
+        if (!empty($data['source_table']) && !empty($data['source_id']) && strtolower((string)$data['source_table']) !== 'filesystem') {
+            return strtolower((string)$data['source_table']) . '#' . (string)$data['source_id'];
+        }
+
+        $path = !empty($data['file_path']) ? $this->storage_normalize_path($data['file_path']) : '';
+        if ($path !== '') {
+            return 'filesystem#' . sha1(strtolower($path));
+        }
+
+        if (!empty($data['source_table']) && !empty($data['source_id'])) {
+            return strtolower((string)$data['source_table']) . '#' . (string)$data['source_id'];
+        }
+
+        return 'filesystem#' . sha1(json_encode($data));
+    }
+
+    private function storage_should_skip_path($path)
+    {
+        $name = strtolower(basename((string)$path));
+        if ($name === '') {
+            return true;
+        }
+
+        if (in_array($name, ['index.html', '.ds_store', 'thumbs.db', 'desktop.ini', '.htaccess', '.gitkeep'], true)) {
+            return true;
+        }
+
+        $normalized = str_replace('\\', '/', (string)$path);
+        if (strpos($normalized, '/.tmb/') !== false || strpos($normalized, '/.thumbs/') !== false) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function storage_root_paths()
+    {
+        if (function_exists('system_limits_storage_roots')) {
+            $roots = system_limits_storage_roots();
+            if (is_array($roots) && !empty($roots)) {
+                return $roots;
+            }
+        }
+
+        $roots = [];
+        if (defined('FCPATH')) {
+            $roots[] = rtrim(FCPATH, '/\\') . DIRECTORY_SEPARATOR . 'uploads';
+            $roots[] = rtrim(FCPATH, '/\\') . DIRECTORY_SEPARATOR . 'media';
+        }
+        return array_values(array_unique(array_filter($roots)));
+    }
+
+    public function register_storage_asset($data, $replace = true)
+    {
+        return $this->upsert_storage_file($data, $replace);
+    }
+
+    public function forget_storage_asset($reference)
+    {
+        if (!$this->db->table_exists($this->storage_table)) {
+            return false;
+        }
+
+        if (is_array($reference)) {
+            if (!empty($reference['id'])) {
+                $reference = (int)$reference['id'];
+            } elseif (!empty($reference['file_path'])) {
+                $reference = $reference['file_path'];
+            } elseif (!empty($reference['source_table']) && !empty($reference['source_id'])) {
+                $reference = strtolower((string)$reference['source_table']) . '#' . (string)$reference['source_id'];
+            } else {
+                return false;
+            }
+        }
+
+        $this->db->where('is_deleted', 0);
+        if (is_numeric($reference)) {
+            $row = $this->db->where('id', (int)$reference)->get($this->storage_table)->row_array();
+        } else {
+            $reference = $this->storage_normalize_path((string)$reference);
+            $row = $this->db->group_start()
+                ->where('storage_key', $reference)
+                ->or_where('file_path', $reference)
+                ->group_end()
+                ->get($this->storage_table)->row_array();
+        }
+
+        if (!$row) {
+            return false;
+        }
+
+        $this->db->where('id', (int)$row['id'])->update($this->storage_table, ['is_deleted' => 1, 'updated_at' => date('Y-m-d H:i:s')]);
+        $this->add_audit('file_deleted', 'Tracked file was removed from central storage tracking.', ['id' => (int)$row['id'], 'file' => $row['file_name'] ?? '', 'path' => $row['file_path'] ?? '']);
+        return true;
+    }
+
+    public function sync_storage_inventory($force = false, $limit = 20000)
+    {
+        if (!$this->db->table_exists($this->storage_table)) {
+            return 0;
+        }
+
+        if (!$this->storage_sync_due($force)) {
+            return 0;
+        }
+
+        $limit = max(1000, (int)$limit);
         $count = 0;
-        if ($this->db->table_exists(db_prefix().'files')) {
-            $files = $this->db->get(db_prefix().'files')->result_array();
-            foreach ($files as $file) {
-                $path = $this->resolve_file_path($file['rel_type'] ?? '', $file['rel_id'] ?? '', $file['file_name'] ?? '');
-                $count += $this->upsert_storage_file([
-                    'staff_id'=>$file['staffid'] ?? null,
-                    'client_id'=>$file['contact_id'] ?? null,
-                    'module_name'=>system_limits_guess_module_from_rel_type($file['rel_type'] ?? ''),
-                    'related_id'=>$file['rel_id'] ?? null,
-                    'file_name'=>$file['file_name'] ?? '',
-                    'file_path'=>$path,
-                    'file_type'=>strtolower(pathinfo($file['file_name'] ?? '', PATHINFO_EXTENSION)),
-                    'mime_type'=>$file['filetype'] ?? '',
-                    'file_size'=>is_file($path) ? filesize($path) : 0,
-                    'source_table'=>'files',
-                    'source_id'=>$file['id'] ?? null,
-                    'uploaded_at'=>$file['dateadded'] ?? null,
-                    'is_deleted'=>is_file($path) ? 0 : 1,
+        $now = date('Y-m-d H:i:s');
+
+        if ($this->db->table_exists(db_prefix() . 'files')) {
+            $rows = $this->db->get(db_prefix() . 'files')->result_array();
+            foreach ($rows as $row) {
+                if ($count >= $limit) {
+                    break;
+                }
+                $path = $this->resolve_file_path($row['rel_type'] ?? '', $row['rel_id'] ?? '', $row['file_name'] ?? '');
+                $this->upsert_storage_file([
+                    'storage_key' => 'files#' . (int)($row['id'] ?? 0),
+                    'staff_id' => $row['staffid'] ?? null,
+                    'client_id' => $row['contact_id'] ?? null,
+                    'module_name' => system_limits_guess_module_from_rel_type($row['rel_type'] ?? ''),
+                    'related_id' => $row['rel_id'] ?? null,
+                    'file_name' => $row['file_name'] ?? '',
+                    'file_path' => $path,
+                    'file_type' => strtolower(pathinfo($row['file_name'] ?? '', PATHINFO_EXTENSION)),
+                    'mime_type' => $row['filetype'] ?? '',
+                    'file_size' => is_file($path) ? filesize($path) : 0,
+                    'source_table' => 'files',
+                    'source_id' => $row['id'] ?? null,
+                    'uploaded_at' => $row['dateadded'] ?? null,
+                    'is_deleted' => is_file($path) ? 0 : 1,
                 ]);
+                $count++;
             }
         }
-        if ($this->db->table_exists(db_prefix().'project_files')) {
-            $files = $this->db->get(db_prefix().'project_files')->result_array();
-            foreach ($files as $file) {
-                $path = get_upload_path_by_type('project') . ($file['project_id'] ?? '') . '/' . ($file['file_name'] ?? '');
-                $count += $this->upsert_storage_file([
-                    'staff_id'=>$file['staffid'] ?? null,
-                    'client_id'=>$file['contact_id'] ?? null,
-                    'module_name'=>'Projects',
-                    'related_id'=>$file['project_id'] ?? null,
-                    'file_name'=>$file['original_file_name'] ?: ($file['file_name'] ?? ''),
-                    'file_path'=>$path,
-                    'file_type'=>strtolower(pathinfo($file['file_name'] ?? '', PATHINFO_EXTENSION)),
-                    'mime_type'=>$file['filetype'] ?? '',
-                    'file_size'=>is_file($path) ? filesize($path) : 0,
-                    'source_table'=>'project_files',
-                    'source_id'=>$file['id'] ?? null,
-                    'uploaded_at'=>$file['dateadded'] ?? null,
-                    'is_deleted'=>is_file($path) ? 0 : 1,
+
+        if ($this->db->table_exists(db_prefix() . 'project_files')) {
+            $rows = $this->db->get(db_prefix() . 'project_files')->result_array();
+            foreach ($rows as $row) {
+                if ($count >= $limit) {
+                    break;
+                }
+                $path = get_upload_path_by_type('project') . ($row['project_id'] ?? '') . '/' . ($row['file_name'] ?? '');
+                $this->upsert_storage_file([
+                    'storage_key' => 'project_files#' . (int)($row['id'] ?? 0),
+                    'staff_id' => $row['staffid'] ?? null,
+                    'client_id' => $row['contact_id'] ?? null,
+                    'module_name' => 'Projects',
+                    'related_id' => $row['project_id'] ?? null,
+                    'file_name' => $row['original_file_name'] ?: ($row['file_name'] ?? ''),
+                    'file_path' => $path,
+                    'file_type' => strtolower(pathinfo($row['file_name'] ?? '', PATHINFO_EXTENSION)),
+                    'mime_type' => $row['filetype'] ?? '',
+                    'file_size' => is_file($path) ? filesize($path) : 0,
+                    'source_table' => 'project_files',
+                    'source_id' => $row['id'] ?? null,
+                    'uploaded_at' => $row['dateadded'] ?? null,
+                    'is_deleted' => is_file($path) ? 0 : 1,
                 ]);
+                $count++;
             }
         }
-        $this->add_audit('storage_scan', 'Storage scan completed.', ['synced_files'=>$count]);
+
+        foreach ($this->storage_root_paths() as $root) {
+            if ($count >= $limit) {
+                break;
+            }
+            if (!$root || !is_dir($root)) {
+                continue;
+            }
+
+            try {
+                $iterator = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS)
+                );
+                foreach ($iterator as $file) {
+                    if ($count >= $limit) {
+                        break;
+                    }
+                    if (!$file->isFile()) {
+                        continue;
+                    }
+                    $path = $this->storage_normalize_path($file->getPathname());
+                    if ($path === '' || $this->storage_should_skip_path($path)) {
+                        continue;
+                    }
+
+                    $name = $file->getFilename();
+                    $this->upsert_storage_file([
+                        'storage_key' => 'filesystem#' . sha1(strtolower($path)),
+                        'staff_id' => null,
+                        'client_id' => null,
+                        'module_name' => 'Filesystem / Third Party',
+                        'related_id' => null,
+                        'file_name' => $name,
+                        'file_path' => $path,
+                        'file_type' => strtolower(pathinfo($name, PATHINFO_EXTENSION)),
+                        'mime_type' => function_exists('mime_content_type') ? @mime_content_type($path) : '',
+                        'file_size' => (int)$file->getSize(),
+                        'source_table' => 'filesystem',
+                        'source_id' => sha1(strtolower($path)),
+                        'uploaded_at' => date('Y-m-d H:i:s', $file->getMTime()),
+                        'is_deleted' => 0,
+                    ]);
+                    $count++;
+                }
+            } catch (Throwable $e) {
+                log_message('error', 'System Limits storage inventory scan failed for ' . $root . ': ' . $e->getMessage());
+            }
+        }
+
+        $this->refresh_deleted_flags(0);
+        $this->rebuild_usage_cache(true);
+        update_option('system_limits_storage_last_sync_at', (string)time());
         return $count;
     }
 
-    private function upsert_storage_file($data)
+    public function scan_storage_files()
     {
-        if (empty($data['source_table']) || empty($data['source_id'])) { return 0; }
-        $this->db->where('source_table',$data['source_table'])->where('source_id',$data['source_id']);
-        $exists = $this->db->get($this->storage_table)->row_array();
+        return $this->sync_storage_inventory(true);
+    }
+
+    private function upsert_storage_file($data, $replace = true)
+    {
+        if (empty($data['source_table']) && empty($data['file_path'])) {
+            return 0;
+        }
+
+        $data['file_path'] = !empty($data['file_path']) ? $this->storage_normalize_path($data['file_path']) : '';
+        $data['storage_key'] = $this->storage_build_key($data);
         $data['updated_at'] = date('Y-m-d H:i:s');
-        if ($exists) { $this->db->where('id',$exists['id'])->update($this->storage_table, $data); return 1; }
+
+        $existing = null;
+        if (!empty($data['source_table']) && !empty($data['source_id']) && strtolower((string)$data['source_table']) !== 'filesystem') {
+            $existing = $this->db->where('source_table', $data['source_table'])->where('source_id', $data['source_id'])->get($this->storage_table)->row_array();
+        }
+
+        if (!$existing && !empty($data['storage_key'])) {
+            $existing = $this->db->where('storage_key', $data['storage_key'])->get($this->storage_table)->row_array();
+        }
+
+        if (!$existing && !empty($data['file_path'])) {
+            $existing = $this->db->where('file_path', $data['file_path'])->get($this->storage_table)->row_array();
+        }
+
+        if ($existing) {
+            if (empty($data['source_table']) && !empty($existing['source_table'])) {
+                $data['source_table'] = $existing['source_table'];
+            }
+            if (empty($data['source_id']) && !empty($existing['source_id'])) {
+                $data['source_id'] = $existing['source_id'];
+            }
+            if (empty($data['storage_key']) && !empty($existing['storage_key'])) {
+                $data['storage_key'] = $existing['storage_key'];
+            }
+
+            if (!$replace) {
+                return (int)$existing['id'];
+            }
+
+            $this->db->where('id', $existing['id'])->update($this->storage_table, $data);
+            return (int)$existing['id'];
+        }
+
         $data['created_at'] = date('Y-m-d H:i:s');
-        $this->db->insert($this->storage_table, $data); return 1;
+        $this->db->insert($this->storage_table, $data);
+        return (int)$this->db->insert_id();
     }
 
     private function resolve_file_path($rel_type, $rel_id, $file_name)
@@ -285,11 +543,15 @@ class System_limits_model extends App_Model
 
     public function storage_summary($refresh = false)
     {
-        if ($refresh) { $this->refresh_deleted_flags(250); }
         if (!$this->db->table_exists($this->storage_table)) {
             $limit = (int)get_option('system_limits_storage_limit_bytes');
             return ['used_bytes'=>0,'total_files'=>0,'limit_bytes'=>$limit,'remaining_bytes'=>$limit,'usage_percent'=>0];
         }
+
+        if ($refresh || $this->storage_sync_due(false)) {
+            $this->sync_storage_inventory($refresh);
+        }
+
         $row = $this->db->select('COALESCE(SUM(file_size),0) as used_bytes, COUNT(id) as total_files')
             ->where('is_deleted', 0)->get($this->storage_table)->row_array();
         $limit = (int)get_option('system_limits_storage_limit_bytes');
@@ -398,21 +660,8 @@ class System_limits_model extends App_Model
 
     public function scan_media_folder($limit = 5000)
     {
-        $base = defined('FCPATH') ? FCPATH.'media' : '';
-        if (!$base || !is_dir($base)) { return 0; }
-        $count=0; $staffMap=$this->staff_media_slug_map();
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS));
-        foreach ($it as $file) {
-            if (!$file->isFile()) continue;
-            $name=$file->getFilename(); if ($name==='index.html' || strpos($file->getPathname(), DIRECTORY_SEPARATOR.'.tmb'.DIRECTORY_SEPARATOR)!==false) continue;
-            $rel = str_replace($base.DIRECTORY_SEPARATOR, '', $file->getPathname());
-            $slug = explode(DIRECTORY_SEPARATOR, $rel)[0] ?? '';
-            $staffId = $staffMap[$slug] ?? null;
-            $this->upsert_storage_file(['staff_id'=>$staffId,'client_id'=>null,'module_name'=>'Media / Attachments','related_id'=>null,'file_name'=>$name,'file_path'=>$file->getPathname(),'file_type'=>strtolower(pathinfo($name, PATHINFO_EXTENSION)),'mime_type'=>function_exists('mime_content_type')?mime_content_type($file->getPathname()):'','file_size'=>$file->getSize(),'source_table'=>'media_folder','source_id'=>crc32($file->getPathname()),'uploaded_at'=>date('Y-m-d H:i:s',$file->getMTime()),'is_deleted'=>0]);
-            if (++$count >= $limit) break;
-        }
-        $this->rebuild_usage_cache(true);
-        return $count;
+        // Compatibility wrapper: the central inventory sync now includes media and uploads.
+        return 0;
     }
 
     private function staff_media_slug_map()
@@ -424,15 +673,20 @@ class System_limits_model extends App_Model
         return $map;
     }
 
-    public function refresh_deleted_flags($limit = 100)
+    public function refresh_deleted_flags($limit = 0)
     {
         if (!$this->db->table_exists($this->storage_table)) { return; }
-        $rows = $this->db->select('id,file_path')->where('is_deleted',0)->limit($limit)->get($this->storage_table)->result_array();
-        foreach ($rows as $row) {
-            if (!empty($row['file_path']) && !is_file($row['file_path'])) {
-                $this->db->where('id',$row['id'])->update($this->storage_table, ['is_deleted'=>1,'updated_at'=>date('Y-m-d H:i:s')]);
+
+        $queryLimit = ((int)$limit > 0) ? (int)$limit : 500;
+        do {
+            $rows = $this->db->select('id,file_path')->where('is_deleted',0)->limit($queryLimit)->get($this->storage_table)->result_array();
+            foreach ($rows as $row) {
+                if (!empty($row['file_path']) && !is_file($row['file_path'])) {
+                    $this->db->where('id',$row['id'])->update($this->storage_table, ['is_deleted'=>1,'updated_at'=>date('Y-m-d H:i:s')]);
+                }
             }
-        }
+            $scanned = count($rows);
+        } while ($limit <= 0 && $scanned === $queryLimit);
     }
 
     public function send_usage_warning_if_needed($eventKey, $eventType, $payload = [])

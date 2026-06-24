@@ -188,6 +188,117 @@ function system_limits_guess_module_from_rel_type($type)
 }
 
 
+
+function system_limits_storage_extra_roots()
+{
+    $raw = trim((string)get_option('system_limits_storage_extra_roots'));
+    if ($raw === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        $decoded = array_filter(array_map('trim', explode(',', $raw)));
+    }
+
+    $roots = [];
+    foreach ($decoded as $root) {
+        $root = trim((string)$root);
+        if ($root === '') {
+            continue;
+        }
+        $root = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $root);
+        $roots[$root] = $root;
+    }
+
+    return array_values($roots);
+}
+
+function system_limits_storage_add_root($path)
+{
+    $path = trim((string)$path);
+    if ($path === '') {
+        return false;
+    }
+
+    $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+    $roots = system_limits_storage_extra_roots();
+    $roots[] = $path;
+    $roots = array_values(array_unique(array_filter($roots)));
+    update_option('system_limits_storage_extra_roots', json_encode($roots));
+    return true;
+}
+
+function system_limits_storage_remove_root($path)
+{
+    $path = trim((string)$path);
+    if ($path === '') {
+        return false;
+    }
+
+    $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
+    $roots = array_values(array_filter(system_limits_storage_extra_roots(), function ($root) use ($path) {
+        return $root !== $path;
+    }));
+    update_option('system_limits_storage_extra_roots', json_encode($roots));
+    return true;
+}
+
+function system_limits_storage_roots()
+{
+    $roots = [];
+    if (defined('FCPATH')) {
+        $roots[] = rtrim(FCPATH, '/\\') . DIRECTORY_SEPARATOR . 'uploads';
+        $roots[] = rtrim(FCPATH, '/\\') . DIRECTORY_SEPARATOR . 'media';
+    }
+
+    foreach (system_limits_storage_extra_roots() as $root) {
+        $roots[] = $root;
+    }
+
+    if (function_exists('hooks')) {
+        try {
+            $filtered = hooks()->apply_filters('system_limits_storage_roots', $roots);
+            if (is_array($filtered)) {
+                $roots = $filtered;
+            }
+        } catch (Throwable $e) {
+            // Ignore hook errors and keep the default roots.
+        }
+    }
+
+    $out = [];
+    foreach ($roots as $root) {
+        $root = trim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, (string)$root));
+        if ($root !== '') {
+            $out[$root] = $root;
+        }
+    }
+
+    return array_values($out);
+}
+
+function system_limits_storage_sync($force = false, $limit = 20000)
+{
+    $CI = &get_instance();
+    $CI->load->model('system_limits/System_limits_model', 'sl_model');
+    return $CI->sl_model->sync_storage_inventory($force, $limit);
+}
+
+function system_limits_storage_register($data, $replace = true)
+{
+    $CI = &get_instance();
+    $CI->load->model('system_limits/System_limits_model', 'sl_model');
+    return $CI->sl_model->register_storage_asset($data, $replace);
+}
+
+function system_limits_storage_forget($reference)
+{
+    $CI = &get_instance();
+    $CI->load->model('system_limits/System_limits_model', 'sl_model');
+    return $CI->sl_model->forget_storage_asset($reference);
+}
+
 function system_limits_elfinder_upload_presave($cmd, &$result, $args, $elfinder, $volume)
 {
     if (get_option('system_limits_storage_enabled') != '1') { return true; }

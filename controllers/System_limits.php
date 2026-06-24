@@ -66,8 +66,7 @@ class System_limits extends AdminController
     public function scan()
     {
         if (!is_admin()) { access_denied('system_limits'); }
-        $count = $this->sl_model->scan_storage_files();
-        $count += $this->sl_model->scan_media_folder();
+        $count = $this->sl_model->sync_storage_inventory(true);
         $this->sl_model->rebuild_usage_cache(true);
         set_alert('success', sprintf(_l('system_limits_scan_completed'), $count));
         redirect(admin_url('system_limits/report'));

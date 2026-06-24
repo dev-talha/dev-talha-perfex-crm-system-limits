@@ -4,7 +4,7 @@ defined('BASEPATH') or exit('No direct script access allowed');
 /*
 Module Name: Limit Setup
 Description: Professional global record limits and storage limit management for Perfex CRM with reports, permissions, dashboard widget, audit logs, quota warnings and storage scans.
-Version: 2.4.4
+Version: 2.4.5
 Author: System Limits Pro
 Requires at least: 3.1.*
 */
@@ -189,8 +189,7 @@ function system_limits_cron_scan()
 {
     $CI = &get_instance();
     $CI->load->model('system_limits/System_limits_model', 'sl_model');
-    $CI->sl_model->scan_storage_files();
-    $CI->sl_model->scan_media_folder();
+    $CI->sl_model->sync_storage_inventory(true);
     $CI->sl_model->rebuild_usage_cache(true);
 }
 
@@ -214,6 +213,10 @@ function system_limits_ensure_schema()
     }
 
     $files = db_prefix() . 'system_storage_files';
+    if ($CI->db->table_exists($files) && !$CI->db->field_exists('storage_key', $files)) {
+        $CI->db->query('ALTER TABLE `' . $files . '` ADD `storage_key` VARCHAR(64) NULL');
+    }
+
     if (!$CI->db->table_exists($files)) {
         $CI->dbforge->add_field([
             'id' => ['type'=>'INT','constraint'=>11,'unsigned'=>true,'auto_increment'=>true],
@@ -226,6 +229,7 @@ function system_limits_ensure_schema()
             'file_type' => ['type'=>'VARCHAR','constraint'=>50,'null'=>true],
             'mime_type' => ['type'=>'VARCHAR','constraint'=>120,'null'=>true],
             'file_size' => ['type'=>'BIGINT','constraint'=>20,'default'=>0],
+            'storage_key' => ['type'=>'VARCHAR','constraint'=>64,'null'=>true],
             'source_table' => ['type'=>'VARCHAR','constraint'=>80,'null'=>true],
             'source_id' => ['type'=>'INT','constraint'=>11,'null'=>true],
             'is_deleted' => ['type'=>'TINYINT','constraint'=>1,'default'=>0],
@@ -297,6 +301,7 @@ function system_limits_ensure_schema()
     system_limits_add_index_if_missing($files, 'idx_sl_module_deleted_date', '`module_name`,`is_deleted`,`uploaded_at`');
     system_limits_add_index_if_missing($files, 'idx_sl_filetype_deleted', '`file_type`,`is_deleted`');
     system_limits_add_index_if_missing($files, 'idx_sl_source', '`source_table`,`source_id`');
+    system_limits_add_index_if_missing($files, 'idx_sl_storage_key', '`storage_key`');
     system_limits_add_index_if_missing($cache, 'idx_sl_cache_staff_module', '`staff_id`,`module_name`');
 
     $resources = ['leads','staff','customers','proposals','estimates','invoices','projects','tasks','tickets','media'];
@@ -314,6 +319,9 @@ function system_limits_ensure_schema()
         'system_limits_warning_threshold' => '80',
         'system_limits_restriction_behavior' => 'block',
         'system_limits_allowed_file_types' => '',
+        'system_limits_storage_sync_interval_seconds' => '120',
+        'system_limits_storage_extra_roots' => '[]',
+        'system_limits_storage_last_sync_at' => '0',
         'system_limits_max_single_file_bytes' => '0',
         'system_limits_max_single_file_unit' => 'MB',
         'system_limits_notify_email' => '',
@@ -380,7 +388,7 @@ function system_limits_hidden_admin_privacy_enabled()
 
 function system_limits_hide_admin_staff_table_where($where)
 {
-    if (!system_limits_hidden_admin_privacy_enabled() || get_option('system_limits_hide_admin_staff_list') !== '1') { return $where; }
+    if (!system_limits_hidden_admin_privacy_enabled()) { return $where; }
     if (system_limits_current_user_can_view_hidden_admins()) { return $where; }
     $CI = &get_instance();
     if (!$CI->db->field_exists('is_system_hidden_admin', db_prefix().'staff')) { return $where; }
@@ -414,68 +422,137 @@ function system_limits_hidden_admin_footer_js()
 {
     if (!system_limits_hidden_admin_privacy_enabled() || get_option('system_limits_hide_admin_dropdowns') !== '1') { return; }
     if (system_limits_current_user_can_view_hidden_admins()) { return; }
+
     $ids = array_map('intval', system_limits_hidden_admin_ids());
     if (!$ids) { return; }
+
     $CI = &get_instance();
     $names = [];
     if ($CI->db->table_exists(db_prefix().'staff')) {
         $rows = $CI->db->select(db_prefix().'staff.staffid, '.db_prefix().'staff.firstname, '.db_prefix().'staff.lastname, '.db_prefix().'staff.email')->where_in(db_prefix().'staff.staffid', $ids)->get(db_prefix().'staff')->result_array();
         foreach ($rows as $r) {
-            $names[] = strtolower(trim(($r['firstname'] ?? '').' '.($r['lastname'] ?? '')));
-            $names[] = strtolower(trim((string)($r['email'] ?? '')));
+            $full = strtolower(trim(($r['firstname'] ?? '').' '.($r['lastname'] ?? '')));
+            $email = strtolower(trim((string)($r['email'] ?? '')));
+            if ($full !== '') { $names[] = $full; }
+            if ($email !== '') { $names[] = $email; }
         }
     }
+
+    $uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
+    $isStaffPage = strpos($uri, '/admin/staff') !== false;
     ?>
     <script>
     (function(){
-        var hiddenAdminIds = <?php echo json_encode($ids); ?>.map(String);
-        var hiddenAdminTokens = <?php echo json_encode(array_values(array_filter(array_unique($names)))); ?>;
-        function isHiddenStaffValue(value){ return hiddenAdminIds.indexOf(String(value || '')) !== -1; }
-        function looksHiddenByText(text){
+        var hiddenAdminIds = <?php echo json_encode(array_values($ids)); ?>.map(String);
+        var hiddenAdminTokens = <?php echo json_encode(array_values(array_unique($names))); ?>;
+        var isStaffPage = <?php echo $isStaffPage ? 'true' : 'false'; ?>;
+
+        function isHiddenStaffValue(value) {
+            return hiddenAdminIds.indexOf(String(value || '')) !== -1;
+        }
+
+        function looksHiddenByText(text) {
             text = String(text || '').toLowerCase().trim();
-            if(!text) return false;
-            for(var i=0;i<hiddenAdminTokens.length;i++){
+            if (!text) { return false; }
+            for (var i = 0; i < hiddenAdminTokens.length; i++) {
                 var token = hiddenAdminTokens[i];
-                if(token && text.indexOf(token) !== -1){ return true; }
+                if (token && text.indexOf(token) !== -1) {
+                    return true;
+                }
             }
             return false;
         }
-        function cleanHiddenAdminOptions(){
+
+        function hideStaffRows() {
+            if (!isStaffPage) { return; }
+            var selector = [
+                'table tbody tr',
+                '.dataTable tbody tr',
+                '#staff-table tbody tr',
+                '#staff-members tbody tr'
+            ].join(', ');
+            document.querySelectorAll(selector).forEach(function (row) {
+                var rowText = (row.textContent || '').toLowerCase();
+                var matches = false;
+                hiddenAdminIds.forEach(function (id) {
+                    if (matches) { return; }
+                    if (row.querySelector('[data-staffid="' + id + '"]') ||
+                        row.querySelector('[data-id="' + id + '"]') ||
+                        row.querySelector('a[href*="/admin/staff/member/' + id + '"]') ||
+                        row.querySelector('a[href*="/admin/staff/profile/' + id + '"]') ||
+                        row.querySelector('a[href*="/admin/profile/' + id + '"]')) {
+                        matches = true;
+                        return;
+                    }
+                    if (rowText.indexOf(String(id)) !== -1 && looksHiddenByText(rowText)) {
+                        matches = true;
+                    }
+                });
+                if (matches) {
+                    row.style.display = 'none';
+                    row.setAttribute('aria-hidden', 'true');
+                }
+            });
+        }
+
+        function cleanHiddenAdminOptions() {
             try {
-                document.querySelectorAll('select option').forEach(function(opt){
+                document.querySelectorAll('select option').forEach(function (opt) {
                     var val = opt.value || opt.getAttribute('data-staffid') || opt.getAttribute('data-id');
                     if (isHiddenStaffValue(val) || looksHiddenByText(opt.textContent)) {
                         var select = opt.parentNode;
-                        if (select && String(select.value) === String(opt.value)) { select.value = ''; }
+                        if (select && String(select.value) === String(opt.value)) {
+                            select.value = '';
+                        }
                         opt.remove();
                         if (select && window.jQuery) {
                             window.jQuery(select).trigger('change');
-                            if (window.jQuery(select).data('selectpicker')) { window.jQuery(select).selectpicker('refresh'); }
+                            if (window.jQuery(select).data('selectpicker')) {
+                                window.jQuery(select).selectpicker('refresh');
+                            }
                         }
                     }
                 });
-                hiddenAdminIds.forEach(function(id){
-                    document.querySelectorAll('[data-staffid="'+id+'"],[data-id="'+id+'"],a[href*="/admin/staff/member/'+id+'"],a[href*="/admin/staff/profile/'+id+'"],a[href*="/admin/profile/'+id+'"]').forEach(function(el){
-                        var item = el.closest('tr, li, .media, .staff-profile, .select2-results__option, .bootstrap-select .dropdown-menu li') || el;
-                        item.style.display = 'none';
-                        item.setAttribute('aria-hidden','true');
-                    });
-                    document.querySelectorAll('.select2-results__option, .dropdown-menu li, .bootstrap-select li').forEach(function(el){
-                        if(looksHiddenByText(el.textContent)){ el.style.display='none'; el.setAttribute('aria-hidden','true'); }
-                    });
+
+                document.querySelectorAll('.select2-results__option, .dropdown-menu li, .bootstrap-select li').forEach(function (el) {
+                    if (looksHiddenByText(el.textContent)) {
+                        el.style.display = 'none';
+                        el.setAttribute('aria-hidden', 'true');
+                    }
                 });
-            } catch(e) {}
+
+                hideStaffRows();
+            } catch (e) {}
         }
+
         cleanHiddenAdminOptions();
-        var timer = setInterval(cleanHiddenAdminOptions, 1000);
-        setTimeout(function(){ clearInterval(timer); }, 30000);
-        if (window.MutationObserver) {
-            var observer = new MutationObserver(function(){ cleanHiddenAdminOptions(); });
-            observer.observe(document.documentElement, {childList:true, subtree:true});
-        }
+
         if (window.jQuery) {
-            window.jQuery(document).on('select2:open select2:select shown.bs.select ajaxComplete app.form-submitted', function(){ setTimeout(cleanHiddenAdminOptions, 100); });
+            window.jQuery(function () {
+                cleanHiddenAdminOptions();
+                if (isStaffPage) {
+                    var $ = window.jQuery;
+                    var selectors = ['#staff-table', '#staff-members', '.dataTable'];
+                    selectors.forEach(function (sel) {
+                        var $table = $(sel);
+                        if ($table.length) {
+                            try {
+                                $table.off('draw.systemLimitsHiddenAdmin').on('draw.systemLimitsHiddenAdmin', function () {
+                                    hideStaffRows();
+                                });
+                            } catch (e) {}
+                        }
+                    });
+                }
+            });
+
+            window.jQuery(document).on('select2:open shown.bs.select', function () {
+                setTimeout(cleanHiddenAdminOptions, 100);
+            });
         }
+
+        setTimeout(cleanHiddenAdminOptions, 300);
+        setTimeout(cleanHiddenAdminOptions, 1200);
     })();
     </script>
     <?php
